@@ -1,0 +1,5 @@
+assets: /mnt/afs/fanxianzhe/LIBERO/libero/libero/./assets
+bddl_files: /mnt/afs/fanxianzhe/LIBERO/libero/libero/./bddl_files
+benchmark_root: /mnt/afs/fanxianzhe/LIBERO/libero/libero
+datasets: /mnt/afs/fanxianzhe/LIBERO/libero/libero/../datasets
+init_states: /mnt/afs/fanxianzhe/LIBERO/libero/libero/./init_files
