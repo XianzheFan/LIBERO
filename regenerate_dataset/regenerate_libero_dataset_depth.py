@@ -30,6 +30,7 @@ import os
 import h5py
 import numpy as np
 import robosuite.utils.transform_utils as T
+import robosuite.utils.camera_utils as CU
 import tqdm
 from libero.libero import benchmark
 from libero.libero import get_libero_path
@@ -192,6 +193,10 @@ def main(args):
                     raise KeyError(f"Depth keys not found. Available obs keys: {list(obs.keys())}")
                 av_depth = np.asarray(av_depth, dtype=np.float32)
                 eih_depth = np.asarray(eih_depth, dtype=np.float32)
+                
+                av_depth = CU.get_real_depth_map(sim=env.sim, depth_map=av_depth)
+                eih_depth = CU.get_real_depth_map(sim=env.sim, depth_map=eih_depth)
+                
                 av_depth[~np.isfinite(av_depth)] = 0.0
                 eih_depth[~np.isfinite(eih_depth)] = 0.0
                 agentview_depths.append(av_depth)
@@ -264,7 +269,7 @@ def main(args):
 if __name__ == "__main__":
     # Parse command-line arguments
     parser = argparse.ArgumentParser()
-    parser.add_argument("--libero_task_suite", type=str, choices=["libero_goal", "libero_object", "libero_goal", "libero_10", "libero_90"],
+    parser.add_argument("--libero_task_suite", type=str, choices=["libero_goal", "libero_object", "libero_spatial", "libero_10", "libero_90"],
                         help="LIBERO task suite. Example: libero_goal", required=True)
     parser.add_argument("--libero_raw_data_dir", type=str,
                         help="Path to directory containing raw HDF5 dataset. Example: ./LIBERO/libero/datasets/libero_goal", required=True)
@@ -277,8 +282,8 @@ if __name__ == "__main__":
 
 
 """
-python regenerate_libero_dataset_depth.py \
+/mnt/home/fanxianzhe/.conda/envs/galbotvla_env/bin/python /mnt/home/fanxianzhe/LIBERO/regenerate_dataset/regenerate_libero_dataset_depth.py \
 --libero_task_suite libero_goal \
---libero_raw_data_dir /mnt/project/public/public_datasets/libero_data/libero_goal \
+--libero_raw_data_dir /mnt/project/public/public_datasets/LIBERO-datasets/libero_goal \
 --libero_target_dir /mnt/project/public/public_datasets/mix-crop-front-depth-side-290cat-200w/libero_no_noops_depth/libero_goal
 """

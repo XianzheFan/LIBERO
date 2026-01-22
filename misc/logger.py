@@ -58,9 +58,9 @@ class VideoLogger:
         if self.video_writer is None:
             raise RuntimeError("Video recording not started. Call start_recording() first.")
         
-        # Get images and flip them
-        front_img = obs["agentview_image"][::-1]
-        # wrist_img = obs["robot0_eye_in_hand_image"][::-1]
+        # Get images (flip)
+        front_img = obs["agentview_image"][::-1, ::-1]
+        # wrist_img = obs["robot0_eye_in_hand_image"][::-1, ::-1]
         
         # Draw bounding boxes if provided
         if bbox is not None:
@@ -100,40 +100,6 @@ class VideoLogger:
         )
         
         return img
-    
-    # def stop_recording(self, success: bool = False):
-    #     """
-    #     Stop recording and finalize the video.
-        
-    #     Args:
-    #         success: Whether the task was successful
-    #     """
-    #     if self.video_writer is None or self.new_video_name is None or self.video_name is None:
-    #         return
-        
-    #     # Release video writer
-    #     self.video_writer.release()
-    #     self.video_writer = None
-        
-    #     # Update filename based on success
-    #     if success:
-    #         self.new_video_name = self.new_video_name.replace('.mp4', '_success.mp4')
-    #     else:
-    #         self.new_video_name = self.new_video_name.replace('.mp4', '_fail.mp4')
-        
-    #     # Convert video using ffmpeg
-    #     self._convert_video()
-        
-    #     # Clean up original video file
-    #     if os.path.exists(self.video_name):
-    #         os.remove(self.video_name)
-    
-    # def _convert_video(self):
-    #     """Convert video using ffmpeg with x264 codec."""
-    #     if self.video_name is None or self.new_video_name is None:
-    #         return
-    #     command = f'{self.FFMPEG} -y -i {self.video_name} -vcodec libx264 {self.new_video_name} -y > /dev/null 2>&1'
-    #     os.system(command)
     
     def stop_recording(self, success: bool = False):
         if self.video_writer is None or self.new_video_name is None or self.video_name is None:

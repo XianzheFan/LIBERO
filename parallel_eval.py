@@ -31,8 +31,15 @@ def main(cfg: DictConfig) -> None:
     os.makedirs(output_dir, exist_ok=True)
     
     # Generate shell commands
-    commands = 'eval "$(conda shell.bash hook)" \n'
-    commands += 'conda activate galbotvla_env \n'
+    # commands = 'eval "$(conda shell.bash hook)" \n'
+    # commands += 'conda activate galbotvla_env \n'
+    commands = """export XDG_CACHE_HOME=/mnt/home/fanxianzhe/.cache
+export XDG_CONFIG_HOME=/mnt/home/fanxianzhe/.config
+export XDG_DATA_HOME=/mnt/home/fanxianzhe/.local/share
+export MESA_SHADER_CACHE_DIR=$XDG_CACHE_HOME/mesa_shader_cache
+export MESA_GLSL_CACHE_DIR=$XDG_CACHE_HOME/mesa_glsl_cache
+export __GL_SHADER_DISK_CACHE_PATH=$XDG_CACHE_HOME/nvidia_shader_cache
+"""
     
     # Split trials across parallel processes
     for i in range(cfg.parallel_env_num):
@@ -70,14 +77,14 @@ data_dir: data/{cfg.exp_name}
         
         # Generate hydra command using the temporary config
         abs_config_path = os.path.abspath(output_dir)
-        cmd = f'python evaluate_libero_tasks.py --config-path={abs_config_path} --config-name=temp_config_{i} '
+        cmd = f'/mnt/home/fanxianzhe/.conda/envs/galbotvla_env/bin/python evaluate_libero_tasks.py --config-path={abs_config_path} --config-name=temp_config_{i} '
         cmd += '& \n'
         
         commands += cmd
     
     # Wait for all processes to complete
     commands += 'wait $(jobs -p) \n'
-    commands += f'python misc/get_statistics.py name={cfg.exp_name} \n'
+    commands += f'/mnt/home/fanxianzhe/.conda/envs/galbotvla_env/bin/python misc/get_statistics.py name={cfg.exp_name} \n'
     
     # Write and execute commands
     script_path = f'{output_dir}/commands.sh'
