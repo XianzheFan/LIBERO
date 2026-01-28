@@ -3,9 +3,9 @@ defaults:
   - _self_
 
 # Agent communication
-# port: 6682
+port: 6682
 # port: 6680
-port: 6688
+# port: 6688
 # port: 6666
 debug: false
 
@@ -19,7 +19,7 @@ benchmarks:
   - libero_object
   - libero_10
   - libero_goal
-  - libero_spatial
+  # - libero_spatial
 
 # Task limits
 max_tasks_per_benchmark: 10

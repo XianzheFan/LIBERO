@@ -116,7 +116,8 @@ def run_episode(
     env: OffScreenRenderEnv,
     agent: RemoteAgent,
     video_logger: VideoLogger,
-    max_steps: int = 300,
+    max_steps: int = 500,
+    # max_steps: int = 300,
     stabilize_steps: int = 10,
     debug: bool = False,
 ) -> bool:

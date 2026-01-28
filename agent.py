@@ -5,15 +5,21 @@ import zmq
 from collections import deque
 from typing import Dict, Tuple, Optional, Any
 import numpy.typing as npt
+import robosuite.utils.camera_utils as CU
 
 
 class RemoteAgent:
     PROPRIO_HISTORY_SIZE = 4
 
-    def __init__(self, instruction: str, port: int) -> None:
+    def __init__(self, instruction: str, port: int, sim: Optional[Any] = None) -> None:
         self._validate_inputs(instruction, port)
         self._setup_zmq_connection(port)
         self._initialize_state(instruction)
+        self.sim = sim
+
+    def set_sim(self, sim: Any) -> None:
+        """Allow setting sim after construction."""
+        self.sim = sim
 
     def _validate_inputs(self, instruction: str, port: int) -> None:
         if not instruction.strip():
@@ -47,6 +53,19 @@ class RemoteAgent:
         while len(self.proprio_history) < self.proprio_history.maxlen:
             self.proprio_history.append(self.proprio_history[-1])
 
+    def _to_real_depth(self, depth_map: Any) -> np.ndarray:
+        """
+        Convert mujoco normalized depth -> real depth using robosuite CU.get_real_depth_map
+        Returns:
+            depth: float32 HxW, non-finite values set to 0.
+        """
+        depth = np.asarray(depth_map, dtype=np.float32)
+        depth = np.squeeze(depth)  # ensure HxW
+        depth = CU.get_real_depth_map(sim=self.sim, depth_map=depth)
+        depth = np.asarray(depth, dtype=np.float32)
+        depth[~np.isfinite(depth)] = 0.0
+        return depth
+
     # -----------------------------
     # Action path
     # -----------------------------
@@ -73,11 +92,14 @@ class RemoteAgent:
         return action, bbox
 
     def _post_and_get(self, obs: Dict[str, Any], debug: bool = False) -> None:
+        # Convert relative depth -> real depth (before flip; flip doesn't affect values)
+        av_depth = self._to_real_depth(obs.get("agentview_depth", None))
+        eih_depth = self._to_real_depth(obs.get("robot0_eye_in_hand_depth", None))
         data = {
             "image_array": [obs["agentview_image"][::-1, ::-1]],
             "image_wrist_array": [obs["robot0_eye_in_hand_image"][::-1, ::-1]],
-            "depth_array": [obs["agentview_depth"][::-1, ::-1]],
-            "depth_wrist_array": [obs["robot0_eye_in_hand_depth"][::-1, ::-1]],
+            "depth_array": [av_depth[::-1, ::-1][..., None]],  # (256,256,1)
+            "depth_wrist_array": [eih_depth[::-1, ::-1][..., None]],  # (256,256,1)
             "proprio_array": [np.copy(proprio) for proprio in self.proprio_history],
             "env_id": 1,
             "text": self.instruction,

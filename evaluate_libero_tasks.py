@@ -51,7 +51,7 @@ def test(task, task_id, seed, test_set, video_logger, cfg, benchmark_instance):
         print("Invalid task, skipped")
         return
     video_logger.start_recording(test_set, task_id, env.language_instruction, seed)
-    agent = RemoteAgent(env.language_instruction, cfg.port)
+    agent = RemoteAgent(env.language_instruction, cfg.port, sim=env.sim)
     run_episode(env, agent, video_logger, debug=cfg.debug)
     return
 
