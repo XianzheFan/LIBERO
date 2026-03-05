@@ -453,18 +453,35 @@ def _quat2axisangle(quat):
     return (quat[:3] * 2.0 * math.acos(quat[3])) / den
 
 
-def draw_trajectory_on_image(img, current_eef_pos, action_chunk, K, E, orig_res=256, target_res=224, action_scale=0.05, line_color=(235, 206, 135), point_color=(0, 215, 255)):
+def draw_trajectory_on_image(img, current_eef_pos, action_chunk, K, E, orig_res=256, target_res=224, action_scale=0.05, pos_limit=None, tracking_factor=0.35, line_color=(235, 206, 135), point_color=(0, 215, 255)):
     """
-    img: Preprocessed image (flipped and resized, 224x224, np.uint8)
-    current_eef_pos: obs["robot0_eef_pos"] (Current 3D absolute coordinates of the end-effector)
-    action_chunk: Predicted action sequence (N, 7), assuming first 3 dims are (dx, dy, dz)
-    K: Camera intrinsic matrix (3x3)
-    E: Camera extrinsic matrix (4x4)
+    img: Preprocessed image
+    tracking_factor: Simulation of the physical controller's lag rate (0.0 to 1.0). Based on log measurements, 0.35 closely approximates physical reality.
     """
-    # Convert delta actions into absolute 3D positions in the world frame
-    deltas_3d = action_chunk[:, :3] * action_scale
-    future_traj_3d = current_eef_pos + np.cumsum(deltas_3d, axis=0)
-    traj_3d = np.vstack([current_eef_pos, future_traj_3d])
+    traj_3d = [current_eef_pos]
+    curr_pos = current_eef_pos.copy()
+    
+    for step_action in action_chunk:
+        # Extract positional action and apply clipping, consistent with low-level simulation logic
+        delta_action = step_action[:3]
+        clipped_action = np.clip(delta_action, -1.0, 1.0)
+        delta_3d = clipped_action * action_scale
+        
+        # Calculate the absolute target point (Goal) set by the low-level controller
+        goal_pos = curr_pos + delta_3d
+        if pos_limit is not None:
+            goal_pos = np.clip(goal_pos, pos_limit[0], pos_limit[1])
+            
+        # Simulate first-order physical tracking lag
+        # The robotic arm cannot reach goal_pos instantaneously; 
+        # the actual displacement is only tracking_factor times the desired increment.
+        actual_movement = (goal_pos - curr_pos) * tracking_factor
+        next_pos = curr_pos + actual_movement
+        
+        traj_3d.append(next_pos)
+        curr_pos = next_pos
+        
+    traj_3d = np.vstack(traj_3d)
     
     ones = np.ones((traj_3d.shape[0], 1))
     traj_3d_homo = np.hstack([traj_3d, ones])

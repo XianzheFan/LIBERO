@@ -41,15 +41,17 @@ class Args:
     # LIBERO environment-specific parameters
     #################################################################################################################
     task_suite_name: str = (
-        "libero_spatial"  # Task suite. Options: libero_spatial, libero_object, libero_goal, libero_10, libero_90
+        "libero_10"
+        # "libero_spatial"
+        # Task suite. Options: libero_spatial, libero_object, libero_goal, libero_10, libero_90
     )
     num_steps_wait: int = 10  # Number of steps to wait for objects to stabilize i n sim
-    num_trials_per_task: int = 50  # Number of rollouts per task
+    num_trials_per_task: int = 20  # Number of rollouts per task
 
     #################################################################################################################
     # Utils
     #################################################################################################################
-    video_out_path: str = "data/libero/videos"  # Path to save videos
+    video_out_path: str = "data/libero/output"
 
     seed: int = 7  # Random Seed (for reproducibility)
 
@@ -121,6 +123,9 @@ def eval_libero(args: Args) -> None:
             # Setup
             t = 0
             replay_images = []
+            clean_images = []
+            
+            expected_eef_pos = None
 
             logging.info(f"Starting episode {task_episodes+1}...")
             while t < max_steps + args.num_steps_wait:
@@ -155,10 +160,16 @@ def eval_libero(args: Args) -> None:
                         image_tools.resize_with_pad(wrist_img, args.resize_size, args.resize_size)
                     )
 
-                    # Save preprocessed image for replay video
                     replay_images.append(img)
+                    clean_images.append(img)
 
                     if not action_plan:
+                        # if expected_eef_pos is not None:
+                        #     actual_eef_pos = obs["robot0_eef_pos"]
+                        #     # Calculate the Euclidean distance error in 3D space (m)
+                        #     error_dist = np.linalg.norm(expected_eef_pos - actual_eef_pos)
+                        #     logging.info(f"Step {t:03d} | Tracking Error: {error_dist:.4f}m | "
+                        #                  f"Expected: {np.round(expected_eef_pos, 3)} | Actual: {np.round(actual_eef_pos, 3)}")
                         # Finished executing previous action chunk -- compute new chunk
                         # Prepare observations dict
                         element = {
@@ -177,10 +188,20 @@ def eval_libero(args: Args) -> None:
                         # Query model to get action
                         action_chunk = client.infer(element)["actions"]
                         
+                        curr_pos_sim = obs["robot0_eef_pos"].copy()
+                        tracking_factor = 0.35
+                        for step_action in action_chunk[:args.replan_steps]:
+                            clipped_action = np.clip(step_action[:3], -1.0, 1.0)
+                            delta_3d = clipped_action * action_scale
+                            goal_pos = curr_pos_sim + delta_3d
+                            actual_movement = (goal_pos - curr_pos_sim) * tracking_factor
+                            curr_pos_sim = curr_pos_sim + actual_movement
+                        expected_eef_pos = curr_pos_sim
+                        
                         img_with_traj = draw_trajectory_on_image(
                             img=img, 
                             current_eef_pos=obs["robot0_eef_pos"], 
-                            action_chunk=action_chunk, 
+                            action_chunk=action_chunk[:args.replan_steps], 
                             K=K, 
                             E=E,
                             orig_res=LIBERO_ENV_RESOLUTION,
@@ -215,11 +236,35 @@ def eval_libero(args: Args) -> None:
             # Save a replay video of the episode
             suffix = "success" if done else "failure"
             task_segment = task_description.replace(" ", "_")
+            
+            rollout_folder_name = f"rollout_{task_segment}_ep{episode_idx}_{suffix}"
+            rollout_dir = pathlib.Path(args.video_out_path) / rollout_folder_name
+            rollout_dir.mkdir(parents=True, exist_ok=True)
+            
             imageio.mimwrite(
-                pathlib.Path(args.video_out_path) / f"rollout_{task_segment}_ep{episode_idx}_{suffix}.mp4",
+                rollout_dir / "complete_video.mp4",
                 [np.asarray(x) for x in replay_images],
                 fps=10,
             )
+            
+            # The index i corresponds to time t; replay_images[i] represents the frame containing the trajectory
+            # clean_images[i+1 : i + replan_steps] is the sequence of unannotated frames following that image
+            for i in range(0, len(replay_images), args.replan_steps):
+                # If an early stop occurs and the sequence length is insufficient, slicing will automatically handle the boundaries
+                clip_idx = i // args.replan_steps
+                imageio.imwrite(
+                    rollout_dir / f"trajectory_frame_{clip_idx:03d}.png",
+                    np.asarray(replay_images[i])
+                )
+                clip_frames = clean_images[i + 1 : i + args.replan_steps]
+                
+                # If the segment is empty (for example, if the robot finishes exactly at the replan_step frame), no video will be saved
+                if len(clip_frames) > 0:
+                    imageio.mimwrite(
+                        rollout_dir / f"follow_up_clip_{clip_idx:03d}.mp4",
+                        [np.asarray(x) for x in clip_frames],
+                        fps=10,
+                    )
 
             # Log current results
             logging.info(f"Success: {done}")
@@ -262,35 +307,48 @@ def _quat2axisangle(quat):
     return (quat[:3] * 2.0 * math.acos(quat[3])) / den
 
 
-def draw_trajectory_on_image(img, current_eef_pos, action_chunk, K, E, orig_res=256, target_res=224, action_scale=0.05):
+def draw_trajectory_on_image(img, current_eef_pos, action_chunk, K, E, orig_res=256, target_res=224, action_scale=0.05, pos_limit=None, tracking_factor=0.35):
     """
-    img: Preprocessed image (flipped and resized, 224x224, np.uint8)
-    current_eef_pos: obs["robot0_eef_pos"] (Current 3D absolute coordinates of the end-effector)
-    action_chunk: Predicted action sequence (N, 7), assuming first 3 dims are (dx, dy, dz)
-    K: Camera intrinsic matrix (3x3)
-    E: Camera extrinsic matrix (4x4)
+    img: Preprocessed image
+    tracking_factor: Simulation of the physical controller's lag rate (0.0 to 1.0). Based on log measurements, 0.35 closely approximates physical reality.
     """
-    # Convert delta actions into absolute 3D positions in the world frame
-    deltas_3d = action_chunk[:, :3] * action_scale
-    future_traj_3d = current_eef_pos + np.cumsum(deltas_3d, axis=0)
-    traj_3d = np.vstack([current_eef_pos, future_traj_3d])
+    traj_3d = [current_eef_pos]
+    curr_pos = current_eef_pos.copy()
+    
+    for step_action in action_chunk:
+        # Extract positional action and apply clipping, consistent with low-level simulation logic
+        delta_action = step_action[:3]
+        clipped_action = np.clip(delta_action, -1.0, 1.0)
+        delta_3d = clipped_action * action_scale
+        
+        # Calculate the absolute target point (Goal) set by the low-level controller
+        goal_pos = curr_pos + delta_3d
+        if pos_limit is not None:
+            goal_pos = np.clip(goal_pos, pos_limit[0], pos_limit[1])
+            
+        # Simulate first-order physical tracking lag
+        # The robotic arm cannot reach goal_pos instantaneously; 
+        # the actual displacement is only tracking_factor times the desired increment.
+        actual_movement = (goal_pos - curr_pos) * tracking_factor
+        next_pos = curr_pos + actual_movement
+        
+        traj_3d.append(next_pos)
+        curr_pos = next_pos
+        
+    traj_3d = np.vstack(traj_3d)
     
     ones = np.ones((traj_3d.shape[0], 1))
     traj_3d_homo = np.hstack([traj_3d, ones])
     
-    # World to Camera Transform (MUST use inverse of E)
     E_inv = np.linalg.inv(E)
     traj_cam_homo = (E_inv @ traj_3d_homo.T).T
     traj_cam = traj_cam_homo[:, :3]
     
-    # Project to 2D pixel plane
     traj_2d_homo = (K @ traj_cam.T).T
     
-    # Divide by depth Z to get 2D pixel coordinates (u, v)
     u = traj_2d_homo[:, 0] / traj_2d_homo[:, 2]
     v = traj_2d_homo[:, 1] / traj_2d_homo[:, 2]
     
-    # Compensate for 180-degree image rotation and resizing
     u = orig_res - 1 - u
     scale = target_res / orig_res
     u = u * scale
@@ -299,15 +357,14 @@ def draw_trajectory_on_image(img, current_eef_pos, action_chunk, K, E, orig_res=
     img_drawn = img.copy()
     points_2d = np.vstack((u, v)).T.astype(np.int32)
     
-    # Draw the trajectory line and points
     for i in range(len(points_2d) - 1):
         pt1 = tuple(points_2d[i])
         pt2 = tuple(points_2d[i+1])
-        cv2.line(img_drawn, pt1, pt2, (235, 206, 135), 2)  # Gold line
-        cv2.circle(img_drawn, pt1, 3, (0, 215, 255), -1)   # Blue point
+        cv2.line(img_drawn, pt1, pt2, (235, 206, 135), 2)  
+        cv2.circle(img_drawn, pt1, 3, (0, 215, 255), -1)   
         
-    cv2.circle(img_drawn, tuple(points_2d[0]), 5, (120, 200, 80), -1)  # BGR Emerald Green start
-    cv2.circle(img_drawn, tuple(points_2d[-1]), 5, (255, 127, 80), -1) # BGR Coral Red end
+    cv2.circle(img_drawn, tuple(points_2d[0]), 5, (120, 200, 80), -1)  
+    cv2.circle(img_drawn, tuple(points_2d[-1]), 5, (255, 127, 80), -1) 
     
     return img_drawn
 
