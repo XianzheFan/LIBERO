@@ -42,22 +42,15 @@ from google.genai import types
 import tqdm
 import tyro
 
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
 
 LIBERO_DUMMY_ACTION = [0.0] * 6 + [-1.0]
 LIBERO_ENV_RESOLUTION = 256
 ROLLOUT_FPS = 10
 
 GEMINI_QUERY_INTERVAL_FRAMES = 40   # every 4s at 10 fps
-GEMINI_HISTORY_FRAMES = 220          # send up to ~22s of context per query
+GEMINI_HISTORY_FRAMES = 200          # send up to ~20s of context per query
 GEMINI_MODEL = "gemini-2.5-flash-preview-04-17"
 
-
-# ---------------------------------------------------------------------------
-# Gemini helpers
-# ---------------------------------------------------------------------------
 
 class FrameEvaluation(BaseModel):
     reasoning: str
@@ -170,10 +163,6 @@ def _write_gemini_results(gemini_results: list, rollout_dir: pathlib.Path,
     logging.info(f"[Gemini] Results written to {out_path}")
 
 
-# ---------------------------------------------------------------------------
-# CLI args
-# ---------------------------------------------------------------------------
-
 @dataclasses.dataclass
 class Args:
     host: str = "0.0.0.0"
@@ -186,10 +175,6 @@ class Args:
     video_out_path: str = "data/libero/output"
     seed: int = 7
 
-
-# ---------------------------------------------------------------------------
-# Main evaluation loop
-# ---------------------------------------------------------------------------
 
 def eval_libero(args: Args) -> None:
     np.random.seed(args.seed)
@@ -360,17 +345,14 @@ def eval_libero(args: Args) -> None:
             rollout_dir = pathlib.Path(args.video_out_path) / rollout_folder_name
             rollout_dir.mkdir(parents=True, exist_ok=True)
 
-            # ---- Write Gemini evaluations ----
             _write_gemini_results(gemini_results, rollout_dir, task_description, episode_idx, suffix)
 
-            # ---- Save full video ----
             imageio.mimwrite(
                 rollout_dir / "complete_video.mp4",
                 [np.asarray(x) for x in clean_images],
                 fps=ROLLOUT_FPS,
             )
 
-            # ---- Trajectory visualisation (unchanged from main_1traj_dataset.py) ----
             num_chunks_to_plot = 4
             chunk_size = args.replan_steps * num_chunks_to_plot
             tracking_factor = 0.35
@@ -437,10 +419,6 @@ def eval_libero(args: Args) -> None:
     logging.info(f"Total success rate: {float(total_successes) / float(total_episodes)}")
     logging.info(f"Total episodes: {total_episodes}")
 
-
-# ---------------------------------------------------------------------------
-# Helpers (copied from main_1traj_dataset.py to keep this file self-contained)
-# ---------------------------------------------------------------------------
 
 def _get_libero_env(task, resolution, seed):
     task_description = task.language

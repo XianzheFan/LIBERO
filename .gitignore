@@ -12,6 +12,7 @@ clip/
 gpt/
 bert/
 logs/
+agilex_checkpoints/
 
 *.mp4
 *.png
@@ -20,3 +21,4 @@ libero.egg-info/
 .vscode/
 data/libero/
 .env
+.ipynb_checkpoints/
