@@ -35,6 +35,13 @@ class Args:
     resize_size: int = 224
     replan_steps: int = 5
 
+    # SDE policy server for switch head. If set, the switch head prediction will be used
+    # to decide whether to query the SDE policy server instead of the main policy.
+    sde_host: str | None = None
+    sde_port: int = 8001
+    # Threshold for switch head prediction: if switch_prob > threshold, use SDE policy.
+    switch_threshold: float = 0.5
+
     #################################################################################################################
     # LIBERO environment-specific parameters
     #################################################################################################################
@@ -78,6 +85,10 @@ def eval_libero(args: Args) -> None:
         raise ValueError(f"Unknown task suite: {args.task_suite_name}")
 
     client = _websocket_client_policy.WebsocketClientPolicy(args.host, args.port)
+    sde_client = None
+    if args.sde_host is not None:
+        sde_client = _websocket_client_policy.WebsocketClientPolicy(args.sde_host, args.sde_port)
+        logging.info(f"SDE policy client connected to {args.sde_host}:{args.sde_port}")
 
     # Start evaluation
     total_episodes, total_successes = 0, 0
@@ -147,8 +158,17 @@ def eval_libero(args: Args) -> None:
                             "prompt": str(task_description),
                         }
 
-                        # Query model to get action
-                        action_chunk = client.infer(element)["actions"]
+                        # Query model to get action (and optionally switch prediction)
+                        result = client.infer(element)
+
+                        # Check switch head: if switch_prob > threshold, use SDE policy instead.
+                        if sde_client is not None and "switch" in result:
+                            switch_prob = float(result["switch"])
+                            if switch_prob > args.switch_threshold:
+                                logging.info(f"Switch head triggered (prob={switch_prob:.3f}), using SDE policy")
+                                result = sde_client.infer(element)
+
+                        action_chunk = result["actions"]
                         assert (
                             len(action_chunk) >= args.replan_steps
                         ), f"We want to replan every {args.replan_steps} steps, but policy only predicts {len(action_chunk)} steps."

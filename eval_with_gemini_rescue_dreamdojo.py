@@ -16,6 +16,7 @@ import logging
 import math
 import os
 import pathlib
+import random
 import shutil
 import tempfile
 import threading
@@ -51,13 +52,13 @@ LIBERO_DUMMY_ACTION = [0.0] * 6 + [-1.0]
 LIBERO_ENV_RESOLUTION = 256
 ROLLOUT_FPS = 10
 
-GEMINI_QUERY_INTERVAL_FRAMES = 40
+GEMINI_QUERY_INTERVAL_FRAMES = 20
 GEMINI_HISTORY_FRAMES = 200
 GEMINI_VALUE_MODEL = "gemini-3.1-flash-lite-preview"
 GEMINI_SELECT_MODEL = "gemini-3.1-flash-lite-preview"
 
-RESCUE_SCORE_ABSOLUTE = 0.30
-RESCUE_SCORE_DROP = 0.20
+RESCUE_SCORE_ABSOLUTE = 0.40
+RESCUE_SCORE_DROP = 0.15
 
 TRAJ_COLORS = [
     ((235, 206, 135), (0, 215, 255)),
@@ -89,7 +90,8 @@ def _get_gemini_client():
 
 
 def _dreamdojo_generate(port: int, frame_np: np.ndarray, actions: np.ndarray,
-                        save_name: str, task_description: str = "") -> str | None:
+                        save_name: str, task_description: str = "",
+                        seed: int = 0) -> str | None:
     """POST a generation request to a dreamdojo_server.py instance.
 
     Args:
@@ -98,6 +100,7 @@ def _dreamdojo_generate(port: int, frame_np: np.ndarray, actions: np.ndarray,
         actions: float32 array of shape (T, action_dim).
         save_name: Filename stem for the output video (no extension).
         task_description: Language instruction for the task, e.g. "pick up the mug".
+        seed: Random seed for generation.
 
     Returns:
         The save_path returned by the server, or None on failure.
@@ -114,6 +117,7 @@ def _dreamdojo_generate(port: int, frame_np: np.ndarray, actions: np.ndarray,
         "actions": actions.tolist(),
         "save_name": save_name,
         "prompt": task_description,
+        "seed": seed,
     }
     try:
         resp = requests.post(url, json=payload, timeout=600)
@@ -147,18 +151,27 @@ def _query_gemini_value(frames: list, task_description: str, step_idx: int,
             f'Dense Value Function for an RL model. '
             f'The robot is performing the task: "{task_description}". '
             f'Based on the provided video sequence (including the past history), please '
-            f'evaluate the robot\'s state **over the most recent 4s** and provide a **Value Score** '
+            f'evaluate the robot\'s state **over the most recent 2s** and provide a **Value Score** '
             f'between **0.00** and **1.00**.\n'
+            f'IMPORTANT: Focus on the **final frames** of the video to judge the current state. '
+            f'Do NOT give a high score just because the robot appeared to be on the right track earlier.\n'
             f'Rigorous Scoring Scale:\n'
             f'- 0.00 - 0.20 (Disengaged/Failure State): The robot is not in contact with the target '
-            f'object, is moving in the wrong direction, or has just committed a serious destructive error.\n'
+            f'object, is moving in the wrong direction, has knocked the object away, or the object '
+            f'has slipped out of the gripper.\n'
             f'- 0.20 - 0.40 (Approach State): The robot\'s end-effector is moving correctly toward '
-            f'the target object, but stable interaction has not yet occurred.\n'
-            f'- 0.40 - 0.60 (Initial Interaction State): Successful contact or grasping achieved, '
-            f'but the core task logic has not yet begun.\n'
-            f'- 0.60 - 0.80 (Critical Execution State): The core task is being executed smoothly, '
-            f'only one step away from the final goal.\n'
-            f'- 0.80 - 1.00 (Completion State): The task has been successfully accomplished.\n'
+            f'the target object, but has not yet made contact.\n'
+            f'- 0.40 - 0.60 (Initial Interaction State): The gripper is touching or closing on the '
+            f'object, but the object is NOT yet securely grasped or lifted.\n'
+            f'- 0.60 - 0.80 (Critical Execution State): The object is securely grasped and being '
+            f'lifted, but has not yet reached the goal height or position.\n'
+            f'- 0.80 - 1.00 (Completion State): The task goal is fully achieved — for pick tasks, '
+            f'the object is clearly lifted off the surface and stably held in the gripper.\n'
+            f'Common failure patterns to watch for:\n'
+            f'- Gripper closes but misses the object → score 0.10-0.20\n'
+            f'- Object touched but not grasped (slides away) → score 0.20-0.30\n'
+            f'- Object grasped but slips during lift → score 0.30-0.40\n'
+            f'- Robot arm moving aimlessly or oscillating → score 0.05-0.15\n'
             f'Output strictly in **JSON array format**. Include reasoning, score (two decimal places) '
             f'and status. Example: [{{"reasoning": "...", "score": 0.35, "status": "Approach State"}}]'
         )
@@ -229,10 +242,22 @@ def _check_rescue_needed(score_history: list, lock: threading.Lock) -> bool:
 
 def _gemini_select_best(current_video_path: str, candidate_paths: list,
                         task_description: str) -> int:
+    """Select the best candidate video using Gemini.
+
+    To mitigate VLM position bias, the candidate order is randomized before
+    querying and the selected index is mapped back to the original order.
+    """
     client = _get_gemini_client()
 
+    # Shuffle candidate order to counteract position bias
+    num_cands = len(candidate_paths)
+    shuffled_order = list(range(num_cands))
+    random.shuffle(shuffled_order)
+    shuffled_paths = [candidate_paths[i] for i in shuffled_order]
+    logging.info(f"[Gemini Select] presentation order: {shuffled_order}")
+
     current_file = client.files.upload(file=current_video_path)
-    cand_files = [client.files.upload(file=p) for p in candidate_paths]
+    cand_files = [client.files.upload(file=p) for p in shuffled_paths]
 
     for f in [current_file] + cand_files:
         info = client.files.get(name=f.name)
@@ -269,7 +294,14 @@ def _gemini_select_best(current_video_path: str, candidate_paths: list,
     for cf_file in cand_files:
         client.files.delete(name=cf_file.name)
 
-    return int(result["best_index"])
+    # Map shuffled index back to original index
+    shuffled_best = int(result["best_index"])
+    original_best = shuffled_order[min(shuffled_best, num_cands - 1)]
+    logging.info(
+        f"[Gemini Select] picked shuffled idx {shuffled_best} "
+        f"-> original idx {original_best}"
+    )
+    return original_best
 
 
 def _rescue_select_action(
@@ -305,15 +337,25 @@ def _rescue_select_action(
     }
     action_chunks = [policy_client.infer(element)["actions"] for _ in range(num_samples)]
 
+    # Log action diversity for diagnostics
+    for i in range(num_samples):
+        arr = np.array(action_chunks[i][:replan_steps], dtype=np.float32)
+        logging.info(
+            f"[Rescue] chunk_{i} actions mean={arr.mean():.6f} "
+            f"std={arr.std():.6f} first={arr[0, :3]}"
+        )
+
     # Parallel DreamDojo server requests (one per port)
     # img is uint8 HWC RGB; actions shape (replan_steps, action_dim)
     # Use step_save_dir stem as prefix so videos from different rescues don't overwrite each other
     save_prefix = step_save_dir.name
+    base_seed = int(time.time() * 1e6) % (2**31)
     tasks = [
         {
             "port": dd_base_port + i,
             "actions": np.array(action_chunks[i][:replan_steps], dtype=np.float32),
             "save_name": f"{save_prefix}/chunk_{i}",
+            "seed": base_seed + i,
         }
         for i in range(num_samples)
     ]
@@ -321,7 +363,7 @@ def _rescue_select_action(
     logging.info(f"[Rescue] Launching {num_samples} parallel DreamDojo generation requests...")
 
     def _submit(t):
-        return _dreamdojo_generate(t["port"], img, t["actions"], t["save_name"], task_description)
+        return _dreamdojo_generate(t["port"], img, t["actions"], t["save_name"], task_description, seed=t["seed"])
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=num_samples) as ex:
         futures = {ex.submit(_submit, t): i for i, t in enumerate(tasks)}
@@ -568,7 +610,9 @@ def eval_libero(args: Args) -> None:
                         if rescue:
                             logging.info(f"[Rescue] Activating at frame {num_frames}...")
                             rescue_log.append(num_frames)
-                            step_save_dir = rollout_dir / "rescue_steps" / f"frame{num_frames}"
+                            from datetime import datetime as _dt
+                            _ts = _dt.now().strftime("%Y%m%d_%H%M%S")
+                            step_save_dir = rollout_dir / "rescue_steps" / f"{task_segment}_ep{episode_idx}_frame{num_frames}_{_ts}"
                             best_actions, sel_record = _rescue_select_action(
                                 obs=obs,
                                 img=img,
