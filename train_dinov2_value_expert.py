@@ -1,10 +1,10 @@
 """
 Train a DINOv2-based Value Expert (following DreamDojo's external value model).
 
-Architecture (per DreamDojo paper):
-  - Input: a 4-frame video clip  +  3 current observation images (third-view, left wrist, right wrist)
-  - Frozen DINOv2 ViT-B/14 extracts per-frame CLS features for all 7 images
-  - A learnable Transformer encoder with global attention fuses the temporal + multi-view features
+Architecture:
+  - Input: a 4-frame video clip (DreamDojo output)
+  - Frozen DINOv2 ViT-B/14 extracts per-frame CLS features for all 4 images
+  - A learnable Transformer encoder with global attention fuses the temporal features
   - A small MLP head outputs a **scalar value**: normalized remaining time steps to subtask boundary
 
 Supervision:
@@ -15,9 +15,6 @@ Supervision:
 
 Training data format (directory of .npz files, each containing):
   - "video_clip":        uint8 (4, H, W, 3)    -- 4 consecutive frames
-  - "obs_front":         uint8 (H, W, 3)       -- current third-person view
-  - "obs_wrist_left":    uint8 (H, W, 3)       -- current left wrist camera
-  - "obs_wrist_right":   uint8 (H, W, 3)       -- current right wrist camera
   - "value":             float32 scalar         -- normalized remaining steps (0=done, 1=far)
 
 Usage:
@@ -47,8 +44,7 @@ class DINOv2ValueExpert(nn.Module):
 
     Inputs
     ------
-    video_clip : (B, num_clip_frames, 3, H, W)   – e.g. 4 consecutive frames
-    obs_images : (B, num_obs_views,   3, H, W)   – e.g. 3 current camera views
+    video_clip : (B, num_clip_frames, 3, H, W)   – e.g. 4 consecutive frames from DreamDojo
 
     Output
     ------
@@ -58,7 +54,6 @@ class DINOv2ValueExpert(nn.Module):
     def __init__(
         self,
         num_clip_frames: int = 4,
-        num_obs_views: int = 3,
         dinov2_model: str = "dinov2_vitb14",
         attn_heads: int = 8,
         attn_layers: int = 2,
@@ -67,8 +62,7 @@ class DINOv2ValueExpert(nn.Module):
     ):
         super().__init__()
         self.num_clip_frames = num_clip_frames
-        self.num_obs_views = num_obs_views
-        self.num_tokens = num_clip_frames + num_obs_views  # 7
+        self.num_tokens = num_clip_frames  # 4
 
         # ---- Frozen DINOv2 backbone ----
         self.backbone = torch.hub.load("facebookresearch/dinov2", dinov2_model)
@@ -87,7 +81,7 @@ class DINOv2ValueExpert(nn.Module):
             "img_std", torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
         )
 
-        # ---- Learnable positional embedding to distinguish clip-frames vs obs-views ----
+        # ---- Learnable positional embedding for clip frames ----
         self.pos_embed = nn.Parameter(torch.randn(1, self.num_tokens, self.feature_dim) * 0.02)
 
         # ---- Global attention (Transformer encoder) ----
@@ -136,22 +130,17 @@ class DINOv2ValueExpert(nn.Module):
     def forward(
         self,
         video_clip: torch.Tensor,
-        obs_images: torch.Tensor,
     ) -> torch.Tensor:
         """
         video_clip : (B, num_clip_frames, 3, H, W) float32 [0,1]
-        obs_images : (B, num_obs_views,   3, H, W) float32 [0,1]
         Returns: (B,) value scores
         """
         clip_feats = self._encode_frames(video_clip)   # (B, 4, D)
-        obs_feats = self._encode_frames(obs_images)     # (B, 3, D)
 
-        # Concatenate: [clip_frame_0 … clip_frame_3, obs_front, obs_wrist_L, obs_wrist_R]
-        tokens = torch.cat([clip_feats, obs_feats], dim=1)  # (B, 7, D)
-        tokens = tokens + self.pos_embed
+        tokens = clip_feats + self.pos_embed  # (B, 4, D)
 
         # Global attention
-        tokens = self.temporal_attn(tokens)  # (B, 7, D)
+        tokens = self.temporal_attn(tokens)  # (B, 4, D)
 
         # Mean pool over all tokens → value
         pooled = tokens.mean(dim=1)  # (B, D)
@@ -161,7 +150,6 @@ class DINOv2ValueExpert(nn.Module):
     def score_video(
         self,
         video_frames: torch.Tensor,
-        obs_images: torch.Tensor,
         window_size: int = 4,
         stride: int = 1,
     ) -> torch.Tensor:
@@ -169,7 +157,6 @@ class DINOv2ValueExpert(nn.Module):
         Score an entire generated video using stride-1 sliding windows.
 
         video_frames : (B, L, 3, H, W)   – L frames of generated / real video
-        obs_images   : (B, 3, 3, H, W)   – current observation (shared for all windows)
 
         Returns: (B, num_windows) per-window values
         """
@@ -179,14 +166,14 @@ class DINOv2ValueExpert(nn.Module):
 
         for i in range(0, num_windows * stride, stride):
             clip = video_frames[:, i : i + window_size]  # (B, 4, 3, H, W)
-            v = self.forward(clip, obs_images)            # (B,)
+            v = self.forward(clip)                        # (B,)
             all_values.append(v)
 
         return torch.stack(all_values, dim=1)  # (B, num_windows)
 
 
 class ValueExpertDataset(Dataset):
-    """Dataset of (4-frame clip, 3 obs images, value label) from .npz files."""
+    """Dataset of (4-frame clip, value label) from .npz files."""
 
     def __init__(self, data_dir: str, num_clip_frames: int = 4):
         self.data_dir = pathlib.Path(data_dir)
@@ -209,15 +196,9 @@ class ValueExpertDataset(Dataset):
             clip = torch.cat([clip, pad], dim=0)
         clip = clip[: self.num_clip_frames]
 
-        # Observation images: each (H, W, 3) uint8 → (3, H, W) float [0,1]
-        obs_front = torch.from_numpy(data["obs_front"]).permute(2, 0, 1).float() / 255.0
-        obs_wl = torch.from_numpy(data["obs_wrist_left"]).permute(2, 0, 1).float() / 255.0
-        obs_wr = torch.from_numpy(data["obs_wrist_right"]).permute(2, 0, 1).float() / 255.0
-        obs = torch.stack([obs_front, obs_wl, obs_wr], dim=0)  # (3, 3, H, W)
-
         value = torch.tensor(float(data["value"]), dtype=torch.float32)
 
-        return clip, obs, value
+        return clip, value
 
 
 def train(args):
@@ -226,7 +207,6 @@ def train(args):
 
     model = DINOv2ValueExpert(
         num_clip_frames=args.num_clip_frames,
-        num_obs_views=3,
         dinov2_model=args.dinov2_model,
         attn_heads=args.attn_heads,
         attn_layers=args.attn_layers,
@@ -264,9 +244,9 @@ def train(args):
             model.backbone.eval()
 
         total_loss, num_batches = 0.0, 0
-        for clip, obs, values in train_loader:
-            clip, obs, values = clip.to(device), obs.to(device), values.to(device)
-            pred = model(clip, obs)
+        for clip, values in train_loader:
+            clip, values = clip.to(device), values.to(device)
+            pred = model(clip)
             loss = F.mse_loss(pred, values)
 
             optimizer.zero_grad()
@@ -286,9 +266,9 @@ def train(args):
             model.eval()
             vl, vn = 0.0, 0
             with torch.no_grad():
-                for clip, obs, values in val_loader:
-                    clip, obs, values = clip.to(device), obs.to(device), values.to(device)
-                    pred = model(clip, obs)
+                for clip, values in val_loader:
+                    clip, values = clip.to(device), values.to(device)
+                    pred = model(clip)
                     vl += F.mse_loss(pred, values).item()
                     vn += 1
             avg_val = vl / max(vn, 1)
